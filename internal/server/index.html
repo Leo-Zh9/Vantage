@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vantage — live traffic analytics</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #131a22; --line: #1f2a36;
+    --text: #e6edf3; --muted: #8b9aa9; --accent: #f6821f; --accent2: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: #2ecc71; display: inline-block; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px; max-width: 1100px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
+  .card .value small { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  canvas { width: 100%; height: 120px; display: block; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 4px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  td.key { color: var(--accent2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; }
+  td.num { text-align: right; color: var(--muted); }
+  .bars { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>VANTAGE</h1>
+  <span class="meta" id="meta">connecting…</span>
+</header>
+<main>
+  <div class="grid">
+    <div class="card"><div class="label">Requests / sec</div><div class="value" id="rps">–</div></div>
+    <div class="card"><div class="label">Total requests</div><div class="value" id="total">–</div></div>
+    <div class="card"><div class="label">Unique visitors</div><div class="value" id="uniq">–</div></div>
+    <div class="card"><div class="label">p50 latency</div><div class="value" id="p50">– <small>ms</small></div></div>
+    <div class="card"><div class="label">p95 latency</div><div class="value" id="p95">– <small>ms</small></div></div>
+    <div class="card"><div class="label">p99 latency</div><div class="value" id="p99">– <small>ms</small></div></div>
+    <div class="card"><div class="label">Dropped events</div><div class="value" id="drop">–</div></div>
+    <div class="card"><div class="label">Sketch memory</div><div class="value" id="mem">– <small>KB</small></div></div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Throughput — last 60s</h2>
+      <canvas id="spark" width="640" height="120"></canvas>
+      <div class="bars" id="status" style="margin-top:14px"></div>
+    </div>
+    <div class="panel">
+      <h2>Top paths</h2>
+      <table id="paths"><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Top client IPs</h2>
+      <table id="ips"><tbody></tbody></table>
+    </div>
+    <div class="panel">
+      <h2>About</h2>
+      <p style="color:var(--muted)">Unique visitors are estimated with a <b>HyperLogLog</b> sketch (~16&nbsp;KB),
+      top paths/IPs with a <b>Count-Min Sketch</b>, and latency percentiles with a bucketed histogram —
+      all in memory that stays flat regardless of traffic volume.</p>
+      <p style="color:var(--muted)">JSON: <code>/api/stats</code> · Prometheus: <code>/metrics</code></p>
+    </div>
+  </div>
+  <div class="footer" id="foot"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"k" : String(n);
+
+function drawSpark(history) {
+  const c = $("spark"), ctx = c.getContext("2d");
+  const w = c.width, h = c.height, pad = 4;
+  ctx.clearRect(0, 0, w, h);
+  if (!history || !history.length) return;
+  const max = Math.max(1, ...history);
+  const step = (w - pad*2) / (history.length - 1 || 1);
+  ctx.beginPath();
+  history.forEach((v, i) => {
+    const x = pad + i*step;
+    const y = h - pad - (v/max)*(h - pad*2);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = "#f6821f";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.lineTo(w - pad, h - pad);
+  ctx.lineTo(pad, h - pad);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(246,130,31,0.12)";
+  ctx.fill();
+}
+
+function rows(tbody, items) {
+  tbody.innerHTML = "";
+  if (!items || !items.length) {
+    tbody.innerHTML = '<tr><td class="key" style="color:var(--muted)">no traffic yet</td></tr>';
+    return;
+  }
+  for (const it of items) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="key">${it.key.replace(/</g,"&lt;")}</td><td class="num">${fmt(it.count)}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function tick() {
+  try {
+    const s = await (await fetch("/api/stats", {cache:"no-store"})).json();
+    $("rps").textContent = fmt(s.requests_per_sec);
+    $("total").textContent = fmt(s.total_requests);
+    $("uniq").textContent = fmt(s.unique_visitors);
+    $("p50").innerHTML = s.latency_p50_ms.toFixed(2) + ' <small>ms</small>';
+    $("p95").innerHTML = s.latency_p95_ms.toFixed(2) + ' <small>ms</small>';
+    $("p99").innerHTML = s.latency_p99_ms.toFixed(2) + ' <small>ms</small>';
+    $("drop").textContent = fmt(s.dropped_events);
+    $("mem").innerHTML = (s.sketch_memory_bytes/1024).toFixed(0) + ' <small>KB</small>';
+    drawSpark(s.rps_history);
+    rows($("paths").tBodies[0], s.top_paths);
+    rows($("ips").tBodies[0], s.top_ips);
+
+    const sc = s.status_classes || {};
+    $("status").innerHTML = Object.keys(sc).sort().map(k =>
+      `<span class="pill">${k}: ${fmt(sc[k])}</span>`).join("");
+
+    $("meta").textContent = `uptime ${Math.floor(s.uptime_seconds)}s · ${fmt(s.total_bytes)} bytes proxied`;
+    $("foot").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("meta").textContent = "disconnected — retrying…";
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

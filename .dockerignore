@@ -1,0 +1,5 @@
+.git
+bin
+*.out
+*.test
+*.md

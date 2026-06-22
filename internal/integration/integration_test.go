@@ -81,7 +81,7 @@ func TestEndToEnd(t *testing.T) {
 					return
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				done.Add(1)
 			}
 		}(int64(w) + 1)
@@ -123,7 +123,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if want := fmt.Sprintf("vantage_requests_total %d", n); !strings.Contains(string(body), want) {
 		t.Errorf("/metrics missing %q", want)
 	}

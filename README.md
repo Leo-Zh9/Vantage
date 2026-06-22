@@ -63,6 +63,21 @@ curl localhost:9090/api/stats        # JSON
 curl localhost:9090/metrics          # Prometheus
 ```
 
+## Put it in front of a real site
+
+`-backend` can be any origin, including a live HTTPS site. Vantage rewrites the
+outbound `Host` header to the origin, so the backend serves the correct site:
+
+```bash
+go run ./cmd/vantage -backend https://example.com
+# now browse http://localhost:8080 — you're viewing the real site *through*
+# Vantage, and every request shows up on the dashboard at http://localhost:9090
+```
+
+This is a safe way to test against a real origin without touching its DNS or
+real visitors. Routing real traffic through Vantage is a later step: deploy it
+publicly (see [Deploy](#deploy)) and point your domain's DNS at it.
+
 ## Endpoints
 
 | Plane    | Path          | Description                                  |

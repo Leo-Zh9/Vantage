@@ -33,7 +33,7 @@ func TestProxyForwardsAndObserves(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("status = %d, want 201", resp.StatusCode)
@@ -72,12 +72,33 @@ func TestProxyBadGatewayOnDeadBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
 	}
 	if len(obs.events) != 1 || obs.events[0].Status != http.StatusBadGateway {
 		t.Fatalf("expected one 502 event, got %+v", obs.events)
+	}
+}
+
+func TestProxyRewritesHostToBackend(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Host", r.Host) // echo the Host the origin received
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	front := httptest.NewServer(New(target, &capture{}))
+	defer front.Close()
+
+	resp, err := http.Get(front.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	if got := resp.Header.Get("X-Seen-Host"); got != target.Host {
+		t.Errorf("backend saw Host %q, want the origin host %q", got, target.Host)
 	}
 }

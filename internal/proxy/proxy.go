@@ -28,11 +28,20 @@ type Proxy struct {
 	obs Observer
 }
 
-// New builds a reverse proxy for target that reports to obs.
+// New builds a reverse proxy for target that reports to obs. It rewrites the
+// outbound Host header to the target's host so the origin serves the right
+// virtual host (a platform like Vercel routes by Host, so forwarding the
+// client's "localhost:8080" would miss), and sets the X-Forwarded-* headers.
 func New(target *url.URL, obs Observer) *Proxy {
-	rp := httputil.NewSingleHostReverseProxy(target)
-	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-		w.WriteHeader(http.StatusBadGateway)
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Host = target.Host
+			pr.SetXForwarded()
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			w.WriteHeader(http.StatusBadGateway)
+		},
 	}
 	return &Proxy{rp: rp, obs: obs}
 }

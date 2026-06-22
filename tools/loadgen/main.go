@@ -58,7 +58,7 @@ func main() {
 					continue
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				sent.Add(1)
 			}
 		}(int64(w) + 1)

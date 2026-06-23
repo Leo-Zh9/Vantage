@@ -37,7 +37,7 @@ func NewRateLimiter(threshold uint64, window time.Duration) *RateLimiter {
 		threshold = 1
 	}
 	return &RateLimiter{
-		hot:       NewTopK(trackedIPs, 0.0001, 0.001),
+		hot:       NewTopK(trackedIPs, 0.001, 0.001),
 		threshold: threshold,
 		windowSec: sec,
 		blocked:   make(map[string]uint64),

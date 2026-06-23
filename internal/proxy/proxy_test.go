@@ -82,6 +82,57 @@ func TestProxyBadGatewayOnDeadBackend(t *testing.T) {
 	}
 }
 
+// blocklist is a fake Limiter that blocks a fixed set of IPs.
+type blocklist map[string]bool
+
+func (b blocklist) Blocked(ip string) bool { return b[ip] }
+
+func TestProxyRateLimitsBlockedIP(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer backend.Close()
+
+	target, _ := url.Parse(backend.URL)
+	obs := &capture{}
+	front := httptest.NewServer(New(target, obs, WithLimiter(blocklist{"203.0.113.9": true})))
+	defer front.Close()
+
+	// A flagged IP is rejected with 429 and never reaches the backend.
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/x", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("blocked IP status = %d, want 429", resp.StatusCode)
+	}
+
+	// An unflagged IP is proxied normally.
+	req2, _ := http.NewRequest(http.MethodGet, front.URL+"/y", nil)
+	req2.Header.Set("X-Forwarded-For", "198.51.100.1")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("allowed IP status = %d, want 200", resp2.StatusCode)
+	}
+
+	if len(obs.events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(obs.events))
+	}
+	if !obs.events[0].Blocked || obs.events[0].Status != http.StatusTooManyRequests {
+		t.Errorf("first event should be a blocked 429: %+v", obs.events[0])
+	}
+	if obs.events[1].Blocked {
+		t.Errorf("second event should not be blocked: %+v", obs.events[1])
+	}
+}
+
 func TestProxyRewritesHostToBackend(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Seen-Host", r.Host) // echo the Host the origin received

@@ -21,18 +21,34 @@ type Observer interface {
 	Observe(analytics.Event)
 }
 
+// Limiter decides whether a client IP should be rejected before its request is
+// proxied. *analytics.Engine satisfies it by reading its published blocked set.
+type Limiter interface {
+	Blocked(ip string) bool
+}
+
 // Proxy forwards traffic to a single backend and reports each request to an
 // Observer.
 type Proxy struct {
 	rp  *httputil.ReverseProxy
 	obs Observer
+	lim Limiter // nil disables rate limiting (the default)
+}
+
+// Option configures a Proxy.
+type Option func(*Proxy)
+
+// WithLimiter rejects requests from flagged IPs with 429 before they reach the
+// backend. Without it the proxy forwards every request, as before.
+func WithLimiter(l Limiter) Option {
+	return func(p *Proxy) { p.lim = l }
 }
 
 // New builds a reverse proxy for target that reports to obs. It rewrites the
 // outbound Host header to the target's host so the origin serves the right
 // virtual host (a platform like Vercel routes by Host, so forwarding the
 // client's "localhost:8080" would miss), and sets the X-Forwarded-* headers.
-func New(target *url.URL, obs Observer) *Proxy {
+func New(target *url.URL, obs Observer, opts ...Option) *Proxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
@@ -43,15 +59,31 @@ func New(target *url.URL, obs Observer) *Proxy {
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
-	return &Proxy{rp: rp, obs: obs}
+	p := &Proxy{rp: rp, obs: obs}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	ip := clientIP(r)
+	if p.lim != nil && p.lim.Blocked(ip) {
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		p.obs.Observe(analytics.Event{
+			IP:      ip,
+			Path:    r.URL.Path,
+			Status:  http.StatusTooManyRequests,
+			Latency: time.Since(start),
+			Blocked: true,
+		})
+		return
+	}
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
 	p.rp.ServeHTTP(rec, r)
 	p.obs.Observe(analytics.Event{
-		IP:      clientIP(r),
+		IP:      ip,
 		Path:    r.URL.Path,
 		Status:  rec.status,
 		Latency: time.Since(start),

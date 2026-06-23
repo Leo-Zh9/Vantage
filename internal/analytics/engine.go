@@ -14,6 +14,7 @@ type Event struct {
 	Status  int
 	Latency time.Duration
 	Bytes   int64
+	Blocked bool // request was rejected by the rate limiter (429), not proxied
 }
 
 // Snapshot is an immutable view of the analytics state, rebuilt once per second
@@ -33,6 +34,8 @@ type Snapshot struct {
 	StatusClasses  map[string]uint64 `json:"status_classes"`
 	TopPaths       []KeyCount        `json:"top_paths"`
 	TopIPs         []KeyCount        `json:"top_ips"`
+	ThrottledTotal uint64            `json:"throttled_total"`
+	BlockedIPs     []KeyCount        `json:"blocked_ips"`
 	RPSHistory     []uint64          `json:"rps_history"`
 	MemoryBytes    int               `json:"sketch_memory_bytes"`
 	GeneratedUnix  int64             `json:"generated_unix"`
@@ -49,18 +52,21 @@ type Engine struct {
 	stopped chan struct{}
 	dropped atomic.Uint64
 	snap    atomic.Pointer[Snapshot]
+	blocked atomic.Pointer[map[string]struct{}] // rate-limited IPs; read lock-free by the proxy
 
 	// The fields below are owned exclusively by the run loop.
-	start    time.Time
-	visitors *HyperLogLog
-	paths    *TopK
-	ips      *TopK
-	latency  *Histogram
-	status   map[int]uint64
-	totalReq uint64
-	totalByt uint64
-	curSec   uint64
-	rps      *ring
+	start     time.Time
+	visitors  *HyperLogLog
+	paths     *TopK
+	ips       *TopK
+	latency   *Histogram
+	status    map[int]uint64
+	totalReq  uint64
+	totalByt  uint64
+	throttled uint64
+	curSec    uint64
+	rps       *ring
+	limiter   *RateLimiter // nil unless EnableRateLimit was called
 }
 
 // NewEngine creates an Engine whose intake channel buffers bufferSize events.
@@ -82,6 +88,27 @@ func NewEngine(bufferSize int) *Engine {
 	}
 	e.publish() // seed an empty snapshot so early reads are well-formed
 	return e
+}
+
+// EnableRateLimit turns on per-IP rate limiting. It must be called before Run.
+// Requests from an IP whose count exceeds threshold within window receive a 429;
+// the blocked set is recomputed each second and published for the proxy to read
+// lock-free via Blocked.
+func (e *Engine) EnableRateLimit(threshold uint64, window time.Duration) {
+	e.limiter = NewRateLimiter(threshold, window)
+	empty := map[string]struct{}{}
+	e.blocked.Store(&empty)
+}
+
+// Blocked reports whether ip is currently over the rate-limit threshold. It
+// reads an immutable published set, so the proxy calls it without locking.
+func (e *Engine) Blocked(ip string) bool {
+	set := e.blocked.Load()
+	if set == nil {
+		return false
+	}
+	_, ok := (*set)[ip]
+	return ok
 }
 
 // Observe hands an event to the analytics goroutine without blocking. A full
@@ -107,6 +134,11 @@ func (e *Engine) Run() {
 		case <-ticker.C:
 			e.rps.push(e.curSec)
 			e.curSec = 0
+			if e.limiter != nil {
+				e.limiter.tick()
+				set := e.limiter.blockedSet()
+				e.blocked.Store(&set)
+			}
 			e.publish()
 		case <-e.done:
 			return
@@ -139,9 +171,15 @@ func (e *Engine) apply(ev Event) {
 	if ev.IP != "" {
 		e.visitors.Add(ev.IP)
 		e.ips.Add(ev.IP)
+		if e.limiter != nil {
+			e.limiter.observe(ev.IP)
+		}
 	}
 	if ev.Path != "" {
 		e.paths.Add(ev.Path)
+	}
+	if ev.Blocked {
+		e.throttled++
 	}
 	e.latency.Observe(float64(ev.Latency) / float64(time.Millisecond))
 	e.status[ev.Status/100]++
@@ -151,6 +189,12 @@ func (e *Engine) publish() {
 	classes := make(map[string]uint64, len(e.status))
 	for class, n := range e.status {
 		classes[classLabel(class)] = n
+	}
+	memory := e.visitors.SizeBytes() + e.paths.SizeBytes() + e.ips.SizeBytes()
+	var blockedIPs []KeyCount
+	if e.limiter != nil {
+		blockedIPs = e.limiter.blockedList()
+		memory += e.limiter.SizeBytes()
 	}
 	s := Snapshot{
 		UptimeSeconds:  time.Since(e.start).Seconds(),
@@ -166,8 +210,10 @@ func (e *Engine) publish() {
 		StatusClasses:  classes,
 		TopPaths:       e.paths.Top(),
 		TopIPs:         e.ips.Top(),
+		ThrottledTotal: e.throttled,
+		BlockedIPs:     blockedIPs,
 		RPSHistory:     e.rps.values(),
-		MemoryBytes:    e.visitors.SizeBytes() + e.paths.SizeBytes() + e.ips.SizeBytes(),
+		MemoryBytes:    memory,
 		GeneratedUnix:  time.Now().Unix(),
 	}
 	e.snap.Store(&s)

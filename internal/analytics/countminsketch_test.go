@@ -48,6 +48,47 @@ func TestTopKRecoversHeavyHitters(t *testing.T) {
 	t.Logf("top path: %s with ~%d hits", top[0].Key, top[0].Count)
 }
 
+func TestCountMinSketchMerge(t *testing.T) {
+	a, b := NewCountMinSketch(0.001, 0.001), NewCountMinSketch(0.001, 0.001)
+	r := rand.New(rand.NewSource(3))
+	truth := map[string]uint64{}
+	for i := 0; i < 100000; i++ {
+		key := fmt.Sprintf("/p/%d", r.Intn(500))
+		if i%2 == 0 { // split the stream across two "instances"
+			a.AddAndCount(key)
+		} else {
+			b.AddAndCount(key)
+		}
+		truth[key]++
+	}
+	a.Merge(b)
+	for key, want := range truth { // a merged view never undercounts the combined stream
+		if got := a.Count(key); got < want {
+			t.Fatalf("merged sketch undercounts %s: got %d want >= %d", key, got, want)
+		}
+	}
+}
+
+func TestCountMinSketchReset(t *testing.T) {
+	c := NewCountMinSketch(0.01, 0.01)
+	c.AddAndCount("x")
+	c.Reset()
+	if got := c.Count("x"); got != 0 {
+		t.Errorf("after reset Count(x) = %d, want 0", got)
+	}
+}
+
+func TestTopKReset(t *testing.T) {
+	tk := NewTopK(5, 0.001, 0.001)
+	for i := 0; i < 100; i++ {
+		tk.Add("/a")
+	}
+	tk.Reset()
+	if top := tk.Top(); len(top) != 0 {
+		t.Errorf("after reset Top() = %v, want empty", top)
+	}
+}
+
 func BenchmarkTopKAdd(b *testing.B) {
 	tk := NewTopK(10, 0.0005, 0.001)
 	paths := make([]string, 1024)

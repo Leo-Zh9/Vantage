@@ -62,6 +62,8 @@ func metrics(s Snapshotter) http.HandlerFunc {
 		gaugeOrCounter(&b, "vantage_requests_per_second", "Requests in the last completed second.", "gauge", float64(snap.RequestsPerSec))
 		gaugeOrCounter(&b, "vantage_unique_visitors", "Estimated distinct client IPs (HyperLogLog p=14).", "gauge", float64(snap.UniqueVisitors))
 		gaugeOrCounter(&b, "vantage_events_dropped_total", "Analytics events dropped due to a full buffer.", "counter", float64(snap.Dropped))
+		gaugeOrCounter(&b, "vantage_throttled_total", "Requests rejected with 429 by the rate limiter.", "counter", float64(snap.ThrottledTotal))
+		gaugeOrCounter(&b, "vantage_blocked_ips", "Client IPs currently over the rate-limit threshold.", "gauge", float64(len(snap.BlockedIPs)))
 		gaugeOrCounter(&b, "vantage_sketch_memory_bytes", "Fixed memory held by the analytics sketches.", "gauge", float64(snap.MemoryBytes))
 
 		header(&b, "vantage_request_latency_ms", "Estimated request latency quantiles (bucketed histogram).", "summary")

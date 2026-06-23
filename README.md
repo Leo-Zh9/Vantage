@@ -78,6 +78,33 @@ This is a safe way to test against a real origin without touching its DNS or
 real visitors. Routing real traffic through Vantage is a later step: deploy it
 publicly (see [Deploy](#deploy)) and point your domain's DNS at it.
 
+## Rate limiting / abuse detection
+
+The same heavy-hitter machinery that ranks busy IPs can shed them. With
+`-ratelimit` set, Vantage flags any client IP whose request count over the
+rolling window exceeds the threshold and returns `429` before the request
+reaches the backend:
+
+```bash
+go run ./cmd/vantage -backend http://localhost:8000 -ratelimit 1000 -ratewindow 10
+# any IP over 1000 requests in a 10s window is throttled until it cools off
+```
+
+It tracks only the heaviest IPs, so its memory is fixed no matter how many
+distinct clients appear. Because the backing Count-Min Sketch never undercounts,
+an abuser can never slip under the threshold — at worst a borderline-heavy client
+is flagged slightly early, which is the safe direction. The analytics goroutine
+owns the limiter and publishes the blocked set once per second; the proxy reads
+it without a lock, so enforcement adds nothing to the hot path. Throttling is
+exported as `vantage_throttled_total` and `vantage_blocked_ips`.
+
+## Scale horizontally
+
+Every estimator is **mergeable**: HyperLogLog folds by register-wise maximum and
+the Count-Min Sketch by cell-wise sum. Run an instance per node and merge their
+sketches to get one global view of unique visitors and top talkers across the
+fleet — without ever shipping per-request logs.
+
 ## Endpoints
 
 | Plane    | Path          | Description                                  |
@@ -96,6 +123,8 @@ publicly (see [Deploy](#deploy)) and point your domain's DNS at it.
 | `-listen`   | `:8080`   | data-plane address (client traffic)                |
 | `-admin`    | `:9090`   | control-plane address (dashboard/stats/metrics)    |
 | `-buffer`   | `4096`    | analytics event buffer; events drop when full      |
+| `-ratelimit`| `0`       | max requests per client IP per window; `0` disables |
+| `-ratewindow`| `10`     | rate-limit rolling window, in seconds              |
 
 ## How the estimators work
 

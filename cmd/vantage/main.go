@@ -26,6 +26,8 @@ func main() {
 	admin := flag.String("admin", ":9090", "control-plane address for the dashboard, /api/stats, and /metrics")
 	backend := flag.String("backend", "", "origin URL to proxy to, e.g. http://localhost:8000 (required)")
 	buffer := flag.Int("buffer", 4096, "analytics event buffer size; events are dropped when full")
+	rateLimit := flag.Int("ratelimit", 0, "max requests per client IP within -ratewindow before returning 429; 0 disables")
+	rateWindow := flag.Int("ratewindow", 10, "rate-limit rolling window in seconds")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -42,9 +44,15 @@ func main() {
 	}
 
 	engine := analytics.NewEngine(*buffer)
+	var proxyOpts []proxy.Option
+	if *rateLimit > 0 {
+		engine.EnableRateLimit(uint64(*rateLimit), time.Duration(*rateWindow)*time.Second)
+		proxyOpts = append(proxyOpts, proxy.WithLimiter(engine))
+		log.Printf("rate limit: %d req/IP per %ds window", *rateLimit, *rateWindow)
+	}
 	go engine.Run()
 
-	dataSrv := &http.Server{Addr: *listen, Handler: proxy.New(target, engine), ReadHeaderTimeout: 5 * time.Second}
+	dataSrv := &http.Server{Addr: *listen, Handler: proxy.New(target, engine, proxyOpts...), ReadHeaderTimeout: 5 * time.Second}
 	ctrlSrv := &http.Server{Addr: *admin, Handler: server.NewAdmin(engine), ReadHeaderTimeout: 5 * time.Second}
 
 	go serve(dataSrv, fmt.Sprintf("data plane %s -> %s", *listen, target))

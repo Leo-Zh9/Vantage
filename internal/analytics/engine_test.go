@@ -53,6 +53,26 @@ func TestObserveDropsWhenBufferFull(t *testing.T) {
 	}
 }
 
+func TestEngineRateLimitBlocksHeavyIP(t *testing.T) {
+	e := NewEngine(1 << 16)
+	e.EnableRateLimit(100, 2*time.Second) // >100 req/IP within a 2s window
+	go e.Run()
+	defer e.Stop()
+
+	for i := 0; i < 500; i++ {
+		e.Observe(Event{IP: "203.0.113.50", Path: "/", Status: 200})
+	}
+	for i := 0; i < 10; i++ {
+		e.Observe(Event{IP: "198.51.100.7", Path: "/", Status: 200})
+	}
+
+	// The blocked set is published on the next tick.
+	waitFor(t, func() bool { return e.Blocked("203.0.113.50") })
+	if e.Blocked("198.51.100.7") {
+		t.Errorf("light IP (10 reqs) should not be blocked at threshold 100")
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

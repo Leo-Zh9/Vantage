@@ -79,6 +79,30 @@ func (c *CountMinSketch) Count(key string) uint64 {
 // SizeBytes is the fixed counter footprint (8 bytes per cell).
 func (c *CountMinSketch) SizeBytes() int { return c.d * int(c.w) * 8 }
 
+// Reset zeroes every counter so the sketch can be reused for a new window.
+func (c *CountMinSketch) Reset() {
+	for i := range c.counts {
+		clear(c.counts[i])
+	}
+	c.total = 0
+}
+
+// Merge folds another sketch of identical dimensions into c by summing counters
+// cell-wise. The merged Count estimates match what one sketch would have produced
+// over the combined stream, so per-instance sketches roll up into a global view.
+func (c *CountMinSketch) Merge(o *CountMinSketch) {
+	if o.d != c.d || o.w != c.w {
+		return
+	}
+	for i := range c.counts {
+		row, orow := c.counts[i], o.counts[i]
+		for j := range row {
+			row[j] += orow[j]
+		}
+	}
+	c.total += o.total
+}
+
 // TopK tracks the k most frequent keys in a stream. A Count-Min Sketch supplies
 // frequency estimates while a small map holds the current leaders; a key that
 // outscores the weakest leader evicts it. This is the standard CMS + heap
@@ -139,3 +163,9 @@ func (t *TopK) Top() []KeyCount {
 
 // SizeBytes is the sketch footprint; the leader map is bounded by k.
 func (t *TopK) SizeBytes() int { return t.cms.SizeBytes() }
+
+// Reset clears the leader set and the underlying sketch for a new window.
+func (t *TopK) Reset() {
+	t.cms.Reset()
+	clear(t.keep)
+}

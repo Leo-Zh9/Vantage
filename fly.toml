@@ -1,0 +1,30 @@
+# Fly.io deployment config for Vantage.
+#
+# Edit -backend below to the origin you want to sit in front of, then:
+#   fly launch --no-deploy   # first time: creates the app, keeps this config
+#   fly deploy
+#
+# The data plane (:8080) is exposed publicly over HTTPS. The dashboard (:9090)
+# is intentionally NOT public — reach it privately with `fly proxy 9090:9090`.
+app = "vantage"
+primary_region = "iad"
+
+[build]
+
+[processes]
+# Args are appended to the image ENTRYPOINT (/vantage).
+# For a no-DNS-change test, point -backend at your live site (e.g. https://leo-zhang.com).
+# To front a site for real, point -backend at the ORIGIN (not the public domain) to avoid a loop.
+app = "-listen :8080 -admin :9090 -backend https://REPLACE-WITH-YOUR-ORIGIN"
+
+[http_service]
+internal_port = 8080
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+processes = ["app"]
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"

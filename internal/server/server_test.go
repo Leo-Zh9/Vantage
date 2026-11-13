@@ -31,7 +31,7 @@ func sample() analytics.Snapshot {
 }
 
 func TestStatsJSON(t *testing.T) {
-	h := NewAdmin(fakeStats{sample()})
+	h := NewAdmin(fakeStats{sample()}, ReportOptions{Site: "example.com"})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
 
@@ -48,7 +48,7 @@ func TestStatsJSON(t *testing.T) {
 }
 
 func TestMetricsExposition(t *testing.T) {
-	h := NewAdmin(fakeStats{sample()})
+	h := NewAdmin(fakeStats{sample()}, ReportOptions{Site: "example.com"})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 
@@ -67,7 +67,7 @@ func TestMetricsExposition(t *testing.T) {
 }
 
 func TestHealthAndDashboard(t *testing.T) {
-	h := NewAdmin(fakeStats{sample()})
+	h := NewAdmin(fakeStats{sample()}, ReportOptions{Site: "example.com"})
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))

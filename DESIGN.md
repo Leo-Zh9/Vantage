@@ -77,13 +77,101 @@ overcount (hash collisions only ever add) but never undercounts — bounded by
 Kirsch–Mitzenmacher double hashing (`h1 + i·h2`), so a lookup is one hash
 regardless of depth.
 
-A sketch alone can't *enumerate* the hot keys (it has no key list), so a small
-bounded map tracks the current top-K: a key that outscores the weakest leader
-evicts it. This is the standard "CMS + heap" heavy-hitters scheme — approximate
-recall, but O(1) memory in the number of distinct keys.
+Updates are **conservative**: only the cells holding a key's current minimum
+are raised. The never-undercount guarantee is unchanged, but a light key that
+shares cells with a heavy one picks up far less of its count. That is what
+keeps innocent clients from being rate limited during a flood.
+
+A sketch alone can't *enumerate* the hot keys (it has no key list), so a
+min-heap of size k tracks the current leaders. The weakest leader sits at the
+root, so deciding whether a new key gets in is O(1) and swapping it in is
+O(log k). An earlier version scanned every leader on each miss, which made a
+k=1024 tracker cost ~11.8 µs per request; the heap costs ~0.19 µs.
 
 Measured: recovers the true top-10 paths out of 50k distinct keys under a skewed
 load; never undercounts.
+
+## Rate limiting — detect on every request, block lock-free
+
+The first version flagged abusers from the top-K tracker once per second, which
+had three problems: at most 1,024 IPs could ever be blocked (a botnet bigger
+than k got through, and its members kept evicting each other); enforcement lagged
+up to a second; and the window was fixed, so a client could send a full
+allowance just before a reset and another just after.
+
+Now:
+
+- **Detection is per request.** The limiter's own Count-Min sketch returns the
+  IP's estimate on every increment, so the engine compares it with the threshold
+  right there. Any number of IPs can be caught, tracked or not.
+- **The window slides.** Two sketches hold the current and previous fixed
+  windows; the estimate is `current + previous × (fraction of previous still in
+  the window)`. This is the approximation Cloudflare describes for its rate
+  limiter: O(1) memory, and burst-straddling no longer doubles the allowance.
+- **The blocklist is a `sync.Map` with expiries.** The single analytics
+  goroutine is the only writer; proxy goroutines read it lock-free (~1.7 ns), so
+  a block takes effect on the next request. Blocked requests are still counted,
+  so a client that keeps hammering stays blocked; once it stops, the window
+  drains and the entry expires.
+- **The blocklist is capped** (65,536 entries ≈ 6.5 MB). Offenders beyond the
+  cap are counted in `block_overflow`. A larger distributed attack needs
+  different tools (subnet limits, global load shedding, traffic fingerprinting),
+  not a longer per-IP list.
+- **The sketch is wide and shallow** (4 × 16,384) so collisions stay rare even
+  with thousands of heavy IPs: with 5,000 abusive IPs, 0 of 2,000 light clients
+  were blocked in the test.
+
+## Client IPs — trust only what an edge vouches for
+
+`X-Forwarded-For` is just a header; any client can send `X-Forwarded-For:
+1.2.3.4`. The first version trusted its first hop, which let one client pose as
+thousands, both to dodge the limiter and to inflate visitor counts. Vantage now
+uses the TCP peer address unless `-ip-header` names a header that a trusted
+edge overwrites (`Fly-Client-IP` on Fly.io).
+
+## Site analytics — humans, bots, scanners
+
+Each request is classified from its User-Agent and path:
+
+- **Scanner:** paths only vulnerability scanners request on a site like this
+  one (`.php`, `/wp-login`, `/.env`, `/.git`). Checked first, because scanners
+  often claim to be browsers.
+- **Bot:** self-identified crawlers, preview fetchers, monitors and HTTP
+  libraries, or an empty User-Agent.
+- **Human:** everything else. A determined bot can pass as a browser; the goal
+  is to remove the honest background noise, which is most of it.
+
+A **page view** is a human GET for a document (not `/_next/` assets, images or
+fonts) that succeeded and wasn't a prefetch (`Next-Router-Prefetch`,
+`Sec-Purpose: prefetch`). Referrers are reduced to bare hosts, and internal
+navigation is dropped, so the referrer table answers "where did visitors come
+from".
+
+## Daily history and the Markdown report
+
+A per-day row (visitors, page views, bots, scanner probes, rate-limited) rolls
+over at midnight in `-tz`. Visitors per day comes from a separate HyperLogLog
+that resets at midnight. With `-state`, the history and today's registers
+(16 KB) are written every minute and on shutdown, via a temp file and rename
+so a crash never leaves a truncated file. A mid-day deploy keeps the day's
+counts.
+
+`server.Markdown` renders the snapshot as GitHub-flavoured tables. It contains no
+IP addresses, and every cell is escaped (inline code, `|` escaped, backticks and
+newlines removed) because paths and referrers are attacker-controlled. The report
+is written to `-report-file` and, with `-report-path`, served on the data plane
+behind HTTP Basic auth with a constant-time password comparison. Requests to
+that path are never proxied or counted.
+
+## Origin connection pool
+
+Go's default transport keeps 2 idle connections per host. A proxy talks to one
+host, so under concurrency it was opening and discarding an origin connection
+for nearly every request, adding a handshake each time and filling the OS with
+`TIME_WAIT` sockets. In a 20,000-request local test that exhausted Windows'
+ephemeral ports (16,570 sockets in `TIME_WAIT`) and connections began failing.
+A pool of 256 idle connections per host brought it to 31 sockets and raised
+throughput from 3,921 to 18,122 req/s.
 
 ## Bucketed histogram — latency percentiles
 
@@ -102,19 +190,27 @@ simplicity-over-precision tradeoff.
 
 ## What I'd add next
 
-- **Sliding windows.** Today the sketches are lifetime-cumulative (plus a 60s
-  RPS ring for the chart). Rotating a ring of per-minute sketches would give
-  "last 5 minutes" views; HyperLogLog and Count-Min both merge cleanly, which is
-  why `HyperLogLog.Merge` already exists.
-- **Multiple backends.** Round-robin with passive health checks.
-- **Rate limiting / WAF-lite.** The per-IP Count-Min estimate is already a
-  cheap signal for token-bucket throttling of abusive clients.
+- **Sliding analytics windows.** Top pages and referrers are cumulative since
+  start. Rotating a ring of per-minute sketches would give "last 5 minutes"
+  views; HyperLogLog and Count-Min both merge cleanly, which is why
+  `HyperLogLog.Merge` already exists.
+- **Subnet limits and global load shedding** for distributed attacks that stay
+  under the per-IP threshold.
+- **Multiple backends.** Round-robin with passive health checks, then routing by
+  request content (for example, sending LLM requests that share a prompt prefix
+  to the replica that already has it cached).
 
 ## Testing
 
 - Accuracy tests assert the estimators stay within their error bounds (HLL ≤2%,
   histogram percentiles within ~5%, Count-Min never undercounts, top-K recovers
-  the true heavy hitters).
+  the true heavy hitters, and its heap index stays consistent).
+- Rate-limiter tests cover a 5,000-IP botnet (all blocked, false positives
+  ≤1%), a burst straddling a window boundary, expiry, the blocklist cap, and
+  flat memory over 500k distinct IPs. A fake clock makes them instant.
+- Proxy tests check that a forged `X-Forwarded-For` is ignored by default.
+- Daily-history tests cover midnight rollover in a real time zone and restoring
+  state after a restart on the same day and on the next day.
 - An integration test drives concurrent traffic through the real proxy and
   control plane and checks the published snapshot end to end.
 - The whole suite runs under `-race` in CI; the single-writer model keeps it

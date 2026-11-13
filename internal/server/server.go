@@ -22,9 +22,11 @@ type Snapshotter interface {
 	Snapshot() analytics.Snapshot
 }
 
-// NewAdmin returns the control-plane handler.
-func NewAdmin(s Snapshotter) http.Handler {
+// NewAdmin returns the control-plane handler. The control plane is meant to be
+// private, so its /report.md needs no password.
+func NewAdmin(s Snapshotter, o ReportOptions) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("/report.md", NewReport(s, o, ""))
 	mux.HandleFunc("/api/stats", stats(s))
 	mux.HandleFunc("/metrics", metrics(s))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -61,9 +63,14 @@ func metrics(s Snapshotter) http.HandlerFunc {
 		gaugeOrCounter(&b, "vantage_bytes_total", "Total response bytes proxied.", "counter", float64(snap.TotalBytes))
 		gaugeOrCounter(&b, "vantage_requests_per_second", "Requests in the last completed second.", "gauge", float64(snap.RequestsPerSec))
 		gaugeOrCounter(&b, "vantage_unique_visitors", "Estimated distinct client IPs (HyperLogLog p=14).", "gauge", float64(snap.UniqueVisitors))
+		gaugeOrCounter(&b, "vantage_human_visitors", "Estimated distinct client IPs classified as human.", "gauge", float64(snap.HumanVisitors))
+		gaugeOrCounter(&b, "vantage_page_views_total", "Human page views (no assets, prefetches or bots).", "counter", float64(snap.PageViews))
+		gaugeOrCounter(&b, "vantage_bot_requests_total", "Requests from self-identified bots and HTTP clients.", "counter", float64(snap.BotRequests))
+		gaugeOrCounter(&b, "vantage_scanner_probes_total", "Requests for vulnerability-scanner paths.", "counter", float64(snap.ScannerProbes))
 		gaugeOrCounter(&b, "vantage_events_dropped_total", "Analytics events dropped due to a full buffer.", "counter", float64(snap.Dropped))
 		gaugeOrCounter(&b, "vantage_throttled_total", "Requests rejected with 429 by the rate limiter.", "counter", float64(snap.ThrottledTotal))
-		gaugeOrCounter(&b, "vantage_blocked_ips", "Client IPs currently over the rate-limit threshold.", "gauge", float64(len(snap.BlockedIPs)))
+		gaugeOrCounter(&b, "vantage_blocked_ips", "Client IPs currently over the rate-limit threshold.", "gauge", float64(snap.BlockedCount))
+		gaugeOrCounter(&b, "vantage_block_overflow_total", "Over-limit requests not blocked because the blocklist was full.", "counter", float64(snap.BlockOverflow))
 		gaugeOrCounter(&b, "vantage_sketch_memory_bytes", "Fixed memory held by the analytics sketches.", "gauge", float64(snap.MemoryBytes))
 
 		header(&b, "vantage_request_latency_ms", "Estimated request latency quantiles (bucketed histogram).", "summary")

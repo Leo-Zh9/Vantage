@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Leo-Zh9/vantage/internal/analytics"
@@ -23,7 +24,7 @@ func TestProxyForwardsAndObserves(t *testing.T) {
 
 	target, _ := url.Parse(backend.URL)
 	obs := &capture{}
-	front := httptest.NewServer(New(target, obs))
+	front := httptest.NewServer(New(target, obs, WithIPHeader("X-Forwarded-For")))
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, front.URL+"/api/widgets?id=1", nil)
@@ -95,7 +96,7 @@ func TestProxyRateLimitsBlockedIP(t *testing.T) {
 
 	target, _ := url.Parse(backend.URL)
 	obs := &capture{}
-	front := httptest.NewServer(New(target, obs, WithLimiter(blocklist{"203.0.113.9": true})))
+	front := httptest.NewServer(New(target, obs, WithIPHeader("X-Forwarded-For"), WithLimiter(blocklist{"203.0.113.9": true})))
 	defer front.Close()
 
 	// A flagged IP is rejected with 429 and never reaches the backend.
@@ -130,6 +131,77 @@ func TestProxyRateLimitsBlockedIP(t *testing.T) {
 	}
 	if obs.events[1].Blocked {
 		t.Errorf("second event should not be blocked: %+v", obs.events[1])
+	}
+}
+
+// TestProxyIgnoresForgedForwardedForByDefault: without -ip-header, a client
+// can't pick its own IP by sending X-Forwarded-For.
+func TestProxyIgnoresForgedForwardedForByDefault(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	obs := &capture{}
+	front := httptest.NewServer(New(target, obs))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := obs.events[0].IP; got != "127.0.0.1" {
+		t.Errorf("client ip = %q, want the TCP peer 127.0.0.1, not the forged header", got)
+	}
+}
+
+func TestProxyTrustedEdgeHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	obs := &capture{}
+	front := httptest.NewServer(New(target, obs, WithIPHeader("fly-client-ip")))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/about", nil)
+	req.Header.Set("Fly-Client-IP", "198.51.100.23")
+	req.Header.Set("X-Forwarded-For", "1.2.3.4") // ignored: not the configured header
+	req.Header.Set("User-Agent", "test-browser")
+	req.Header.Set("Referer", "https://www.linkedin.com/")
+	req.Header.Set("Next-Router-Prefetch", "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	ev := obs.events[0]
+	if ev.IP != "198.51.100.23" {
+		t.Errorf("client ip = %q, want the Fly-Client-IP value", ev.IP)
+	}
+	if ev.UserAgent != "test-browser" || ev.Referer != "https://www.linkedin.com/" || !ev.Prefetch || ev.Method != "GET" {
+		t.Errorf("request details not captured: %+v", ev)
+	}
+}
+
+func TestProxyInternalPathIsServedNotProxied(t *testing.T) {
+	var backendHits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHits.Add(1) }))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	obs := &capture{}
+	report := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "report") })
+	front := httptest.NewServer(New(target, obs, WithInternal("/_vantage/report", report)))
+	defer front.Close()
+
+	resp, err := http.Get(front.URL + "/_vantage/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "report" || backendHits.Load() != 0 || len(obs.events) != 0 {
+		t.Errorf("body=%q backendHits=%d events=%d; want the internal handler only, unobserved", body, backendHits.Load(), len(obs.events))
 	}
 }
 

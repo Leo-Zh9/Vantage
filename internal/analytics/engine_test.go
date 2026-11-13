@@ -73,6 +73,59 @@ func TestEngineRateLimitBlocksHeavyIP(t *testing.T) {
 	}
 }
 
+func TestEngineSiteAnalytics(t *testing.T) {
+	e := NewEngine(1 << 12)
+	go e.Run()
+	defer e.Stop()
+
+	site := "www.leo-zhang.com"
+	page := func(ip, path, ref string) Event {
+		return Event{IP: ip, Method: "GET", Host: site, Path: path, UserAgent: chromeUA, Referer: ref, Status: 200}
+	}
+	events := []Event{
+		page("198.51.100.1", "/", "https://www.linkedin.com/feed/"),
+		page("198.51.100.1", "/projects", "https://www.leo-zhang.com/"), // internal click: no referrer
+		page("198.51.100.2", "/", "https://github.com/Leo-Zh9"),
+		page("198.51.100.2", "/_next/static/chunks/app.js", ""), // asset, not a page view
+		{IP: "198.51.100.2", Method: "GET", Host: site, Path: "/about", UserAgent: chromeUA, Status: 200, Prefetch: true},
+		{IP: "198.51.100.3", Method: "GET", Host: site, Path: "/missing", UserAgent: chromeUA, Status: 404},
+		{IP: "66.249.66.1", Method: "GET", Host: site, Path: "/", UserAgent: "Googlebot/2.1", Status: 200},
+		{IP: "45.0.0.9", Method: "GET", Host: site, Path: "/wp-login.php", UserAgent: chromeUA, Status: 404},
+		{IP: "45.0.0.9", Method: "GET", Host: site, Path: "/.env", UserAgent: "", Status: 404},
+	}
+	for _, ev := range events {
+		e.Observe(ev)
+	}
+	waitFor(t, func() bool { return e.Snapshot().TotalRequests == uint64(len(events)) })
+	s := e.Snapshot()
+
+	if s.PageViews != 3 {
+		t.Errorf("page views = %d, want 3 (/, /projects, /)", s.PageViews)
+	}
+	if s.HumanVisitors != 3 {
+		t.Errorf("human visitors = %d, want 3", s.HumanVisitors)
+	}
+	if s.BotRequests != 1 || s.ScannerProbes != 2 {
+		t.Errorf("bots=%d scanners=%d, want 1 and 2", s.BotRequests, s.ScannerProbes)
+	}
+	if len(s.TopPages) == 0 || s.TopPages[0].Key != "/" || s.TopPages[0].Count != 2 {
+		t.Errorf("top pages = %+v, want / with 2 views first", s.TopPages)
+	}
+	refs := map[string]uint64{}
+	for _, kc := range s.TopReferrers {
+		refs[kc.Key] = kc.Count
+	}
+	if len(refs) != 2 || refs["linkedin.com"] != 1 || refs["github.com"] != 1 {
+		t.Errorf("referrers = %+v, want linkedin.com and github.com once each", s.TopReferrers)
+	}
+	if len(s.TopProbes) != 2 {
+		t.Errorf("probes = %+v, want the two scanner paths", s.TopProbes)
+	}
+	if s.Today.PageViews != 3 || s.Today.ScannerProbes != 2 || s.Today.Visitors != 3 {
+		t.Errorf("today = %+v", s.Today)
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

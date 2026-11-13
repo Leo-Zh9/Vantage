@@ -48,6 +48,75 @@ func TestTopKRecoversHeavyHitters(t *testing.T) {
 	t.Logf("top path: %s with ~%d hits", top[0].Key, top[0].Count)
 }
 
+// TestTopKHeapKeepsTrueLeaders checks the heap bookkeeping with a large k: the
+// leaders must be exactly the keys with the highest true counts when those
+// counts are well separated.
+func TestTopKHeapKeepsTrueLeaders(t *testing.T) {
+	const (
+		keys = 300
+		k    = 50
+	)
+	tk := NewTopK(k, 0.0005, 0.001)
+	names := make([]string, keys)
+	var stream []int
+	for i := range names {
+		names[i] = fmt.Sprintf("/k/%d", i)
+		for n := 0; n < 20*(i+1); n++ { // key i gets 20*(i+1) hits
+			stream = append(stream, i)
+		}
+	}
+	r := rand.New(rand.NewSource(11))
+	r.Shuffle(len(stream), func(a, b int) { stream[a], stream[b] = stream[b], stream[a] })
+	for _, i := range stream {
+		tk.Add(names[i])
+	}
+	top := tk.Top()
+	if len(top) != k {
+		t.Fatalf("got %d leaders, want %d", len(top), k)
+	}
+	want := map[string]bool{}
+	for i := keys - k; i < keys; i++ {
+		want[names[i]] = true
+	}
+	missing := 0
+	for _, kc := range top {
+		if !want[kc.Key] {
+			missing++
+		}
+	}
+	// Keys right at the cut-off differ by under 1% in count, so allow a little
+	// slack for the sketch's overcount; the bulk must be exact.
+	if missing > k/10 {
+		t.Errorf("%d of the top %d are not true leaders", missing, k)
+	}
+	for i := 1; i < len(top); i++ {
+		if top[i].Count > top[i-1].Count {
+			t.Fatalf("Top() not sorted at %d", i)
+		}
+	}
+	for key, i := range tk.idx { // heap index must stay consistent
+		if tk.heap[i].Key != key {
+			t.Fatalf("idx[%q]=%d but heap[%d]=%q", key, i, i, tk.heap[i].Key)
+		}
+	}
+}
+
+func BenchmarkTopKAddLargeK(b *testing.B) {
+	tk := NewTopK(1024, 0.001, 0.001)
+	keys := make([]string, 1<<16)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("10.0.%d.%d", i>>8&255, i&255)
+	}
+	for i := 0; i < 1<<16; i++ { // fill the heap first, so misses dominate
+		tk.Add(keys[i%len(keys)])
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tk.Add(keys[i%len(keys)])
+	}
+}
+
 func TestCountMinSketchMerge(t *testing.T) {
 	a, b := NewCountMinSketch(0.001, 0.001), NewCountMinSketch(0.001, 0.001)
 	r := rand.New(rand.NewSource(3))

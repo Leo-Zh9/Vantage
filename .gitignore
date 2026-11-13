@@ -3,3 +3,7 @@
 *.test
 coverage.*
 .DS_Store
+
+# local runs
+report.md
+state.json

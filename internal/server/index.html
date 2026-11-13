@@ -148,7 +148,9 @@ async function tick() {
     $("status").innerHTML = Object.keys(sc).sort().map(k =>
       `<span class="pill">${k}: ${fmt(sc[k])}</span>`).join("");
 
-    $("meta").textContent = `uptime ${Math.floor(s.uptime_seconds)}s · ${fmt(s.total_bytes)} bytes proxied`;
+    $("meta").textContent = `uptime ${Math.floor(s.uptime_seconds)}s · ${fmt(s.human_visitors)} human visitors · ` +
+      `${fmt(s.page_views)} page views · ${fmt(s.bot_requests)} bot · ${fmt(s.scanner_probes)} scanner · ` +
+      `${fmt(s.blocked_count)} blocked · ${fmt(s.total_bytes)} bytes proxied`;
     $("foot").textContent = "updated " + new Date().toLocaleTimeString();
   } catch (e) {
     $("meta").textContent = "disconnected — retrying…";

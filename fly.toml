@@ -1,29 +1,50 @@
-# Fly.io deployment config for Vantage.
+# Fly.io deployment for Vantage in front of www.leo-zhang.com.
 #
-# Edit -backend below to the origin you want to sit in front of, then:
-#   fly launch --no-deploy   # first time: creates the app, keeps this config
+# First deploy (see DEPLOY.md for the full, zero-downtime walkthrough):
+#   fly launch --no-deploy --copy-config --name <your-app-name>
+#   fly volumes create vantage_data --size 1 --region yyz
+#   fly secrets set VANTAGE_REPORT_PASSWORD=<long random password>
 #   fly deploy
 #
-# The data plane (:8080) is exposed publicly over HTTPS. The dashboard (:9090)
-# is intentionally NOT public — reach it privately with `fly proxy 9090:9090`.
-app = "vantage"
-primary_region = "iad"
+# The data plane (:8080) is public over HTTPS. The dashboard (:9090) is NOT
+# public; reach it with `fly proxy 9090:9090`. The Markdown report is public
+# only behind Basic auth, at https://www.leo-zhang.com/_vantage/report.
+app = "REPLACE-WITH-YOUR-APP-NAME"
+primary_region = "yyz" # Toronto: closest to most visitors and to you
 
 [build]
 
 [processes]
 # Args are appended to the image ENTRYPOINT (/vantage).
-# For a no-DNS-change test, point -backend at your live site (e.g. https://leo-zhang.com).
-# To front a site for real, point -backend at the ORIGIN (not the public domain) to avoid a loop.
-app = "-listen :8080 -admin :9090 -backend https://REPLACE-WITH-YOUR-ORIGIN"
+# -backend must be the Vercel ORIGIN (the project's *.vercel.app domain), never
+# www.leo-zhang.com itself: once DNS points here, that would proxy to itself.
+# -ip-header Fly-Client-IP is safe because Fly's edge overwrites that header.
+app = """-listen :8080 -admin :9090 \
+  -backend https://REPLACE-WITH-YOUR-PROJECT.vercel.app \
+  -site www.leo-zhang.com -tz America/Toronto -ip-header Fly-Client-IP \
+  -ratelimit 300 -ratewindow 10 \
+  -state /data/state.json -report-file /data/report.md -report-path /_vantage/report"""
+
+[mounts]
+source = "vantage_data"
+destination = "/data"
 
 [http_service]
 internal_port = 8080
 force_https = true
-auto_stop_machines = "stop"
+# The site must never cold-start, and stopping the machine would also reset the
+# live sketches, so keep exactly one machine running.
+auto_stop_machines = "off"
 auto_start_machines = true
-min_machines_running = 0
+min_machines_running = 1
 processes = ["app"]
+
+  [[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  path = "/_vantage/healthz"
+  timeout = "5s"
 
 [[vm]]
 size = "shared-cpu-1x"

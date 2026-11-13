@@ -21,8 +21,10 @@ fmt:
 lint:
 	golangci-lint run
 
+# -ip-header X-Forwarded-For lets loadgen simulate many visitors locally; never
+# use it where clients can reach Vantage directly.
 run: build
-	$(BINARY) -backend $(BACKEND)
+	$(BINARY) -backend $(BACKEND) -ip-header X-Forwarded-For -ratelimit 100 -report-file report.md
 
 loadgen:
 	go run ./tools/loadgen -url http://localhost:8080 -n 100000 -visitors 5000

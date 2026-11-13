@@ -30,8 +30,10 @@ func wire(t testing.TB) (front, admin *httptest.Server, eng *analytics.Engine, s
 	target, _ := url.Parse(backend.URL)
 	eng = analytics.NewEngine(1 << 16)
 	go eng.Run()
-	front = httptest.NewServer(proxy.New(target, eng))
-	admin = httptest.NewServer(server.NewAdmin(eng))
+	// Simulated visitors identify themselves via X-Forwarded-For, standing in
+	// for the trusted edge header a real deployment would use.
+	front = httptest.NewServer(proxy.New(target, eng, proxy.WithIPHeader("X-Forwarded-For")))
+	admin = httptest.NewServer(server.NewAdmin(eng, server.ReportOptions{Site: "integration.test"}))
 	stop = func() {
 		front.Close()
 		admin.Close()
@@ -126,5 +128,16 @@ func TestEndToEnd(t *testing.T) {
 	_ = resp.Body.Close()
 	if want := fmt.Sprintf("vantage_requests_total %d", n); !strings.Contains(string(body), want) {
 		t.Errorf("/metrics missing %q", want)
+	}
+
+	// The Markdown report renders from the same snapshot.
+	resp, err = http.Get(admin.URL + "/report.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if want := fmt.Sprintf("| Requests proxied | %s |", "20,000"); !strings.Contains(string(report), want) {
+		t.Errorf("/report.md missing %q\n%s", want, report)
 	}
 }
